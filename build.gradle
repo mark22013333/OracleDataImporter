@@ -1,0 +1,46 @@
+plugins {
+    id 'java'
+    id 'com.github.johnrengelman.shadow' version '8.1.1' // 用來打包成單一 JAR
+}
+
+group = 'idv.cheng'
+version = '1.0-SNAPSHOT'
+
+// 設定 Java 版本（JDK 8）
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Oracle JDBC 驅動，適合 Java 8 (支援 Oracle 19c)
+    implementation 'com.oracle.database.jdbc:ojdbc8:19.20.0.0'
+
+    // 測試依賴
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// 設定打包成單一 JAR
+shadowJar {
+    archiveBaseName = 'OracleJDBC'   // JAR 名稱
+    archiveVersion = ''
+    mergeServiceFiles()
+    manifest {
+        attributes 'Main-Class': 'sqlloader.SqlBatchLoader' // 主程式入口
+    }
+}
+
+test {
+    useJUnitPlatform()
+}
+
+// 編碼設定
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
