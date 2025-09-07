@@ -128,6 +128,24 @@ public class StatementSplitter {
         }
     }
 
+    /**
+     * 呼叫於輸入結束時，將緩衝區中未以分號結尾的語句一併送出。
+     */
+    public void finish(Consumer<String> onStatement) {
+        String out = sb.toString().trim();
+        if (!out.isEmpty()) {
+            onStatement.accept(out);
+        }
+        sb.setLength(0);
+        // 重置狀態，避免重複使用造成影響
+        inSingleQuote = false;
+        inDoubleQuote = false;
+        inLineComment = false;
+        inBlockComment = false;
+        parenDepth = 0;
+        prev = 0;
+    }
+
     private void append(char c) {
         if (c != 0) sb.append(c);
     }

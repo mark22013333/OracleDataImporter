@@ -15,6 +15,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * SQL 檔批次匯入 Oracle 工具
@@ -123,111 +124,118 @@ public class SqlBatchLoader {
 
                 StatementSplitter splitter = new StatementSplitter();
                 char[] buf = new char[1 << 15]; // 32KB
-                int len;
-                while ((len = reader.read(buf)) != -1) {
-                    splitter.accept(buf, 0, len, sql -> {
-                        String trimmed = sql.trim();
-                        if (trimmed.isEmpty()) return;
-                        if (!startsWithIgnoreCase(trimmed, "INSERT")) return;
 
-                        String toExec = trimmed;
-                        if (cfg.ignorePk) {
-                            try {
-                                toExec = SqlInsertRewriter.removeColumnFromInsert(trimmed, cfg.pkName);
-                            } catch (RuntimeException ex) {
-                                if (cfg.continueOnError) {
-                                    System.err.println("\n[警告] 無法移除 PK，語句略過並計入失敗： " + ex.getMessage());
-                                    failed.getAndIncrement();
-                                    return;
-                                } else {
-                                    throw ex;
-                                }
+                // 將處理邏輯抽出成變數，便於串流與 EOF 時重用
+                Consumer<String> onStatement = sql -> {
+                    String trimmed = sql.trim();
+                    if (trimmed.isEmpty()) return;
+                    if (!startsWithIgnoreCase(trimmed, "INSERT")) return;
+
+                    String toExec = trimmed;
+                    if (cfg.ignorePk) {
+                        try {
+                            toExec = SqlInsertRewriter.removeColumnFromInsert(trimmed, cfg.pkName);
+                        } catch (RuntimeException ex) {
+                            if (cfg.continueOnError) {
+                                System.err.println("\n[警告] 無法移除 PK，語句略過並計入失敗： " + ex.getMessage());
+                                failed.getAndIncrement();
+                                return;
+                            } else {
+                                throw ex;
                             }
                         }
+                    }
 
-                        // Debug: 檢查是否包含長字串
-                        boolean hasLongString = containsLongStringLiteral(toExec);
+                    // Debug: 檢查是否包含長字串
+                    boolean hasLongString = containsLongStringLiteral(toExec);
+                    if (hasLongString) {
+                        System.out.println("\n[DEBUG] 偵測到長字串語句，將單獨處理");
+                        System.out.println("[DEBUG] SQL 長度: " + toExec.length() + " 字元");
+                        // 顯示前 200 個字元
+                        String preview = toExec.length() > 200 ? toExec.substring(0, 200) + "..." : toExec;
+                        System.out.println("[DEBUG] SQL 預覽: " + preview);
+                    }
+                    try {
                         if (hasLongString) {
-                            System.out.println("\n[DEBUG] 偵測到長字串語句，將單獨處理");
-                            System.out.println("[DEBUG] SQL 長度: " + toExec.length() + " 字元");
-                            // 顯示前 200 個字元
-                            String preview = toExec.length() > 200 ? toExec.substring(0, 200) + "..." : toExec;
-                            System.out.println("[DEBUG] SQL 預覽: " + preview);
-                        }
-                        try {
-                            if (hasLongString) {
-                                // 有長字串 → 先執行現有批次，再單獨處理長字串
-                                if (batched.get() > 0) {
-                                    try {
-                                        int[] rs = stmt.executeBatch();
-                                        conn.commit();
-                                        executed.addAndGet(successCount(rs));
-                                        batched.set(0);
-                                    } catch (SQLException ex) {
-                                        if (cfg.continueOnError) {
-                                            System.err.println("\n[錯誤] 批次執行失敗：" + ex.getMessage());
-                                            failed.addAndGet(batched.get());
-                                            safeFlush(stmt, conn);
-                                            batched.set(0);
-                                        } else {
-                                            throw new RuntimeException("批次執行失敗：" + ex.getMessage(), ex);
-                                        }
-                                    }
-                                }
-
-                                // 單獨處理長字串語句
-                                try (PreparedStatement ps = buildPreparedStatement(conn, toExec)) {
-                                    ps.executeUpdate();
+                            // 有長字串 → 先執行現有批次，再單獨處理長字串
+                            if (batched.get() > 0) {
+                                try {
+                                    int[] rs = stmt.executeBatch();
                                     conn.commit();
-                                    executed.incrementAndGet();
+                                    executed.addAndGet(successCount(rs));
+                                    batched.set(0);
                                 } catch (SQLException ex) {
                                     if (cfg.continueOnError) {
-                                        System.err.println("\n[錯誤] 長字串語句執行失敗：" + ex.getMessage());
-                                        failed.getAndIncrement();
-                                    } else {
-                                        throw new RuntimeException("長字串語句執行失敗：" + ex.getMessage(), ex);
-                                    }
-                                }
-                            } else {
-                                // 沒有長字串 → 走批次
-                                stmt.addBatch(toExec);
-                                batched.getAndIncrement();
-                                if (batched.get() >= cfg.batchSize) {
-                                    System.out.println("\n[DEBUG] 執行批次，大小: " + batched.get());
-                                    try {
-                                        int[] rs = stmt.executeBatch();
-                                        conn.commit();
-                                        executed.addAndGet(successCount(rs));
+                                        System.err.println("\n[錯誤] 批次執行失敗：" + ex.getMessage());
+                                        failed.addAndGet(batched.get());
+                                        safeFlush(stmt, conn);
                                         batched.set(0);
-                                    } catch (SQLException ex) {
-                                        System.err.println("\n[DEBUG] 批次執行失敗，錯誤訊息: " + ex.getMessage());
-                                        if (cfg.continueOnError) {
-                                            failed.addAndGet(batched.get());
-                                            safeFlush(stmt, conn);
-                                            batched.set(0);
-                                        } else {
-                                            throw ex;
-                                        }
+                                    } else {
+                                        throw new RuntimeException("批次執行失敗：" + ex.getMessage(), ex);
                                     }
                                 }
                             }
-                        } catch (SQLException ex) {
-                            if (cfg.continueOnError) {
-                                System.err.println("\n[錯誤] 單筆加入/執行失敗：" + ex.getMessage());
-                                safeFlush(stmt, conn);
-                                failed.getAndIncrement();
-                            } else {
-                                throw new RuntimeException("批次執行失敗：" + ex.getMessage(), ex);
+
+                            // 單獨處理長字串語句
+                            try (PreparedStatement ps = buildPreparedStatement(conn, toExec)) {
+                                ps.executeUpdate();
+                                conn.commit();
+                                executed.incrementAndGet();
+                            } catch (SQLException ex) {
+                                if (cfg.continueOnError) {
+                                    System.err.println("\n[錯誤] 長字串語句執行失敗：" + ex.getMessage());
+                                    failed.getAndIncrement();
+                                } else {
+                                    throw new RuntimeException("長字串語句執行失敗：" + ex.getMessage(), ex);
+                                }
+                            }
+                        } else {
+                            // 沒有長字串 → 走批次
+                            stmt.addBatch(toExec);
+                            batched.getAndIncrement();
+                            if (batched.get() >= cfg.batchSize) {
+                                System.out.println("\n[DEBUG] 執行批次，大小: " + batched.get());
+                                try {
+                                    int[] rs = stmt.executeBatch();
+                                    conn.commit();
+                                    executed.addAndGet(successCount(rs));
+                                    batched.set(0);
+                                } catch (SQLException ex) {
+                                    System.err.println("\n[DEBUG] 批次執行失敗，錯誤訊息: " + ex.getMessage());
+                                    if (cfg.continueOnError) {
+                                        failed.addAndGet(batched.get());
+                                        safeFlush(stmt, conn);
+                                        batched.set(0);
+                                    } else {
+                                        throw ex;
+                                    }
+                                }
                             }
                         }
-
-                        Instant now = Instant.now();
-                        if (Duration.between(lastLog[0], now).toMillis() >= 500) {
-                            lastLog[0] = now;
-                            printProgress(cin.getCount(), totalBytes, executed.get(), totalStatements);
+                    } catch (SQLException ex) {
+                        if (cfg.continueOnError) {
+                            System.err.println("\n[錯誤] 單筆加入/執行失敗：" + ex.getMessage());
+                            safeFlush(stmt, conn);
+                            failed.getAndIncrement();
+                        } else {
+                            throw new RuntimeException("批次執行失敗：" + ex.getMessage(), ex);
                         }
-                    });
+                    }
+
+                    Instant now = Instant.now();
+                    if (Duration.between(lastLog[0], now).toMillis() >= 500) {
+                        lastLog[0] = now;
+                        printProgress(cin.getCount(), totalBytes, executed.get(), totalStatements);
+                    }
+                };
+
+                int len;
+                while ((len = reader.read(buf)) != -1) {
+                    splitter.accept(buf, 0, len, onStatement);
                 }
+
+                // 檔案讀取完成後，處理最後未以分號結尾的語句
+                splitter.finish(onStatement);
 
                 if (batched.get() > 0) {
                     try {
