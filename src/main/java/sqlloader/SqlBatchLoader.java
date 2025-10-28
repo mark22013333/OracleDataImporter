@@ -464,61 +464,99 @@ public class SqlBatchLoader {
         String valuesRegion = sql.substring(openParen + 1, closeParen);
         List<String> values = SqlInsertRewriter.splitTopLevel(valuesRegion);
 
+        // 調試信息：顯示分割結果
+        System.out.println("\n[DEBUG] PreparedStatement 分割結果：");
+        System.out.println("[DEBUG] 預期欄位數量（從 INSERT INTO 提取）：檢查 SQL 語句");
+        System.out.println("[DEBUG] 實際分割出的值數量：" + values.size());
+        for (int i = 0; i < values.size(); i++) {
+            String v = values.get(i).trim();
+            String preview = v.length() > 80 ? v.substring(0, 80) + "..." : v;
+            System.out.println("[DEBUG]   值[" + (i+1) + "]: " + preview);
+        }
+        
         // 改成佔位符
         String newSql = beforeValues + "VALUES (" + String.join(", ", Collections.nCopies(values.size(), "?")) + ")";
         PreparedStatement ps = conn.prepareStatement(newSql);
 
         for (int i = 0; i < values.size(); i++) {
             String v = values.get(i).trim();
+            
+            System.out.println("[DEBUG]   處理參數[" + (i+1) + "]，長度: " + v.length() + " 字元");
+            String typePreview = v.length() > 80 ? v.substring(0, 80) + "..." : v;
+            System.out.println("[DEBUG]   原始值: " + typePreview);
 
-            if (v.equalsIgnoreCase("NULL")) {
-                ps.setNull(i + 1, Types.NULL);
+            try {
+                if (v.equalsIgnoreCase("NULL")) {
+                    System.out.println("[DEBUG]   類型: NULL");
+                    ps.setNull(i + 1, Types.NULL);
 
-            } else if (v.toUpperCase().startsWith("DATE '")) {
-                String literal = v.substring(5).trim();
-                String dateStr = literal.substring(1, literal.length() - 1);
-                try {
-                    ps.setTimestamp(i + 1, Timestamp.valueOf(dateStr.replace('T', ' ')));
-                } catch (IllegalArgumentException e) {
-                    ps.setDate(i + 1, Date.valueOf(dateStr));
-                }
-
-            } else if (v.toUpperCase().startsWith("TIMESTAMP '")) {
-                String literal = v.substring(10).trim();
-                String tsStr = literal.substring(1, literal.length() - 1);
-                try {
-                    ps.setTimestamp(i + 1, Timestamp.valueOf(tsStr.replace('T', ' ')));
-                } catch (IllegalArgumentException e) {
-                    // Try to parse Chinese month format like "19-8月 -25 10.30.00.000000000"
-                    ps.setTimestamp(i + 1, parseChineseMonthTimestamp(tsStr));
-                }
-
-            } else if (v.toUpperCase().startsWith("TO_TIMESTAMP(")) {
-                // Handle to_timestamp function like "to_timestamp('19-8月 -25 10.30.00.000000000 上午','DD-MON-RR HH.MI.SSXFF AM')"
-                ps.setTimestamp(i + 1, parseToTimestampFunction(v));
-
-            } else if (v.startsWith("'") && v.endsWith("'")) {
-                String text = v.substring(1, v.length() - 1).replace("''", "'");
-                int bytes = text.getBytes(StandardCharsets.UTF_8).length;
-
-                if (bytes > 4000 || text.length() > 2000) {
-                    // 超過 Oracle 字串限制 → 改用 CLOB
-                    Reader r = new StringReader(text);
-                    ps.setCharacterStream(i + 1, r, text.length());
-                } else {
-                    ps.setString(i + 1, text);
-                }
-
-            } else {
-                try {
-                    if (v.contains(".")) {
-                        ps.setDouble(i + 1, Double.parseDouble(v));
-                    } else {
-                        ps.setLong(i + 1, Long.parseLong(v));
+                } else if (v.toUpperCase().startsWith("TO_DATE(")) {
+                    System.out.println("[DEBUG]   類型: TO_DATE 函數");
+                    // 處理 TO_DATE 函數
+                    String content = v.substring(8, v.lastIndexOf(')'));
+                    int firstComma = content.indexOf(',');
+                    String dateStr = content.substring(0, firstComma).trim();
+                    if (dateStr.startsWith("'") && dateStr.endsWith("'")) {
+                        dateStr = dateStr.substring(1, dateStr.length() - 1);
                     }
-                } catch (NumberFormatException e) {
-                    ps.setString(i + 1, v);
+                    System.out.println("[DEBUG]   提取的日期字串: " + dateStr);
+                    ps.setTimestamp(i + 1, Timestamp.valueOf(dateStr.replace('T', ' ')));
+                    
+                } else if (v.toUpperCase().startsWith("DATE '")) {
+                    System.out.println("[DEBUG]   類型: DATE 常值");
+                    String literal = v.substring(5).trim();
+                    String dateStr = literal.substring(1, literal.length() - 1);
+                    try {
+                        ps.setTimestamp(i + 1, Timestamp.valueOf(dateStr.replace('T', ' ')));
+                    } catch (IllegalArgumentException e) {
+                        ps.setDate(i + 1, Date.valueOf(dateStr));
+                    }
+
+                } else if (v.toUpperCase().startsWith("TIMESTAMP '")) {
+                    System.out.println("[DEBUG]   類型: TIMESTAMP 常值");
+                    String literal = v.substring(10).trim();
+                    String tsStr = literal.substring(1, literal.length() - 1);
+                    try {
+                        ps.setTimestamp(i + 1, Timestamp.valueOf(tsStr.replace('T', ' ')));
+                    } catch (IllegalArgumentException e) {
+                        ps.setTimestamp(i + 1, parseChineseMonthTimestamp(tsStr));
+                    }
+
+                } else if (v.toUpperCase().startsWith("TO_TIMESTAMP(")) {
+                    System.out.println("[DEBUG]   類型: TO_TIMESTAMP 函數");
+                    ps.setTimestamp(i + 1, parseToTimestampFunction(v));
+
+                } else if (v.startsWith("'") && v.endsWith("'")) {
+                    System.out.println("[DEBUG]   類型: 字串");
+                    String text = v.substring(1, v.length() - 1).replace("''", "'");
+                    int bytes = text.getBytes(StandardCharsets.UTF_8).length;
+
+                    if (bytes > 4000 || text.length() > 2000) {
+                        System.out.println("[DEBUG]   使用 CLOB (長度: " + text.length() + " 字元, " + bytes + " bytes)");
+                        Reader r = new StringReader(text);
+                        ps.setCharacterStream(i + 1, r, text.length());
+                    } else {
+                        System.out.println("[DEBUG]   使用 VARCHAR");
+                        ps.setString(i + 1, text);
+                    }
+
+                } else {
+                    System.out.println("[DEBUG]   類型: 數值或其他");
+                    try {
+                        if (v.contains(".")) {
+                            ps.setDouble(i + 1, Double.parseDouble(v));
+                        } else {
+                            ps.setLong(i + 1, Long.parseLong(v));
+                        }
+                    } catch (NumberFormatException e) {
+                        System.out.println("[DEBUG]   數值解析失敗，改用字串");
+                        ps.setString(i + 1, v);
+                    }
                 }
+                System.out.println("[DEBUG]   參數[" + (i+1) + "] 設置成功");
+            } catch (Exception e) {
+                System.err.println("[錯誤] 設置參數[" + (i+1) + "] 失敗: " + e.getMessage());
+                throw e;
             }
         }
 
