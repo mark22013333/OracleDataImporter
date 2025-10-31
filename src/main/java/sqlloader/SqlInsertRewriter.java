@@ -192,56 +192,65 @@ public class SqlInsertRewriter {
 
     /**
      * 將頂層逗號分隔的清單拆分，忽略括號/字串/雙引號內的逗號
+     * 
+     * 重要：在 VALUES 部分，雙引號應該只在標識符中使用（實際上VALUES中很少用到）
+     * 字符串值中的雙引號（如 HTML 內容）應該被當作普通字符處理
      */
     protected static List<String> splitTopLevel(String region) {
         List<String> out = new ArrayList<>();
         StringBuilder cur = new StringBuilder();
-        boolean inSingle = false, inDouble = false;
-        int depth = 0;
+        boolean inSingle = false;  // 單引號字符串內
+        int depth = 0;  // 括號深度
+        
         for (int i = 0; i < region.length(); i++) {
             char c = region.charAt(i);
             char next = (i + 1 < region.length()) ? region.charAt(i + 1) : 0;
 
-            if (!inDouble && c == '\'') {
+            // 處理單引號字符串（這是最重要的）
+            if (c == '\'') {
                 cur.append(c);
                 if (inSingle) {
+                    // 檢查是否為轉義的單引號 ''
                     if (next == '\'') {
                         cur.append(next);
-                        i++;
-                    } else inSingle = false;
-                } else inSingle = true;
+                        i++;  // 跳過下一個單引號
+                    } else {
+                        // 字符串結束
+                        inSingle = false;
+                    }
+                } else {
+                    // 字符串開始
+                    inSingle = true;
+                }
                 continue;
             }
-            if (!inSingle && c == '"') {
+
+            // 如果在單引號字符串內，所有字符都直接添加（包括雙引號、逗號等）
+            if (inSingle) {
                 cur.append(c);
-                if (inDouble) {
-                    if (next == '"') {
-                        cur.append(next);
-                        i++;
-                    } else inDouble = false;
-                } else inDouble = true;
                 continue;
             }
-            if (!inSingle && !inDouble) {
-                if (c == '(') {
-                    depth++;
-                    cur.append(c);
-                    continue;
-                }
-                if (c == ')') {
-                    depth = Math.max(0, depth - 1);
-                    cur.append(c);
-                    continue;
-                }
-                if (c == ',' && depth == 0) {
-                    out.add(cur.toString().trim());
-                    cur.setLength(0);
-                    continue;
-                }
+
+            // 在字符串外部，處理括號和逗號
+            if (c == '(') {
+                depth++;
+                cur.append(c);
+            } else if (c == ')') {
+                depth = Math.max(0, depth - 1);
+                cur.append(c);
+            } else if (c == ',' && depth == 0) {
+                // 頂層逗號，分割值
+                out.add(cur.toString().trim());
+                cur.setLength(0);
+            } else {
+                cur.append(c);
             }
-            cur.append(c);
         }
-        if (cur.length() > 0) out.add(cur.toString().trim());
+        
+        if (cur.length() > 0) {
+            out.add(cur.toString().trim());
+        }
+        
         return out;
     }
 
